@@ -1,0 +1,63 @@
+# Release Manager Configuration
+
+# Environments
+environments:
+  dev:
+    release_tracking: false  # No release tracking in dev
+    auto_release: false
+
+  qa:
+    release_tracking: true   # Track all releases in QA
+    auto_release: true       # Automatically create releases
+    default_bump: patch
+
+  prod:
+    release_tracking: true
+    auto_release: false      # Manual release process
+    default_bump: minor      # More conservative bumps in prod
+
+# Services to track
+services:
+  - user-api
+  - product-frontend
+  - data-processor
+
+# Version bumping rules
+versioning:
+  rules:
+    patch:
+      description: "Bug fixes, security patches, minor updates"
+      examples:
+        - "Bug fix"
+        - "Security patch"
+        - "Configuration change"
+
+    minor:
+      description: "New features, new services"
+      examples:
+        - "New service added"
+        - "Feature milestone"
+        - "API additions (backwards compatible)"
+
+    major:
+      description: "Breaking changes, major rewrites"
+      examples:
+        - "Platform rewrite"
+        - "Breaking API changes"
+        - "Major architecture change"
+
+# Release manifest settings
+manifest:
+  directory: releases
+  index_file: releases_index.json
+  format: yaml
+  include_metadata: true
+
+# Notification settings
+notifications:
+  enabled: true
+  email:
+    - dev-team@example.com
+  slack:
+    enabled: false
+    webhook_url: ""

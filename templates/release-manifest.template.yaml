@@ -1,0 +1,31 @@
+# Release Manifest Template
+# This template defines the structure of release manifests
+
+version: "{{ version }}"
+environment: "{{ environment }}"
+created_at: "{{ created_at }}"
+
+# Service versions included in this release
+services:
+  user-api: "{{ services.user_api }}"
+  product-frontend: "{{ services.product_frontend }}"
+  data-processor: "{{ services.data_processor }}"
+
+# Release metadata
+metadata:
+  bump_type: "{{ metadata.bump_type }}"
+  previous_version: "{{ metadata.previous_version }}"
+  changes: []
+  notes: "{{ metadata.notes | default('') }}"
+
+# Build information
+build:
+  timestamp: "{{ build.timestamp }}"
+  jenkins_build: "{{ build.jenkins_build | default('') }}"
+  git_commit: "{{ build.git_commit | default('') }}"
+
+# Deployment status
+deployment:
+  dev: false
+  qa: false
+  prod: false

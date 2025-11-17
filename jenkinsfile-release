@@ -1,0 +1,255 @@
+// Jenkins Pipeline for Release Management
+// Automatically detects changes and creates releases
+
+pipeline {
+    agent any
+
+    options {
+        disableConcurrentBuilds()
+        timeout(time: 15, unit: 'MINUTES')
+    }
+
+    parameters {
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['qa', 'prod'],
+            description: 'Target environment'
+        )
+        choice(
+            name: 'ACTION',
+            choices: ['detect', 'create', 'list'],
+            description: 'Release action to perform'
+        )
+        choice(
+            name: 'BUMP_TYPE',
+            choices: ['patch', 'minor', 'major'],
+            description: 'Version bump type (for create action)'
+        )
+        booleanParam(
+            name: 'FORCE_CREATE',
+            defaultValue: false,
+            description: 'Force create release even if no changes detected'
+        )
+    }
+
+    environment {
+        PYTHONUNBUFFERED = '1'
+    }
+
+    stages {
+        stage('Initialize') {
+            steps {
+                script {
+                    echo """
+                    ========================================
+                    Release Manager Pipeline
+                    ========================================
+                    Environment: ${params.ENVIRONMENT}
+                    Action: ${params.ACTION}
+                    Bump Type: ${params.BUMP_TYPE}
+                    Force: ${params.FORCE_CREATE}
+                    ========================================
+                    """
+                }
+            }
+        }
+
+        stage('Setup Python') {
+            steps {
+                script {
+                    sh """
+                        # Try using venv, if not available use virtualenv
+                        if python3 -m venv venv 2>/dev/null; then
+                            echo "Created venv using python3 -m venv"
+                        else
+                            echo "venv module not available, trying virtualenv..."
+                            pip3 install --user virtualenv
+                            python3 -m virtualenv venv
+                        fi
+
+                        . venv/bin/activate
+                        pip install --upgrade pip
+                        pip install -r requirements.txt
+                    """
+                }
+            }
+        }
+
+        stage('Detect Changes') {
+            when {
+                expression { params.ACTION == 'detect' || params.ACTION == 'create' }
+            }
+            steps {
+                script {
+                    echo "Detecting changes..."
+
+                    def detectResult = sh(
+                        script: """
+                            . venv/bin/activate
+                            python3 scripts/release_manager.py detect \
+                                --env ${params.ENVIRONMENT} \
+                                --json
+                        """,
+                        returnStdout: true,
+                        returnStatus: false
+                    ).trim()
+
+                    def detection = readJSON text: detectResult
+
+                    env.NEW_RELEASE_NEEDED = detection.new_release_needed.toString()
+                    env.CHANGES = detection.changes.join(', ')
+
+                    if (detection.new_release_needed) {
+                        echo "✅ Changes detected: ${env.CHANGES}"
+                    } else {
+                        echo "⏭️  No changes detected"
+
+                        if (params.ACTION == 'create' && !params.FORCE_CREATE) {
+                            currentBuild.result = 'SUCCESS'
+                            error("No changes detected and force create not enabled")
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Create Release') {
+            when {
+                expression {
+                    params.ACTION == 'create' &&
+                    (env.NEW_RELEASE_NEEDED == 'true' || params.FORCE_CREATE)
+                }
+            }
+            steps {
+                script {
+                    echo "Creating new release..."
+
+                    def createResult = sh(
+                        script: """
+                            . venv/bin/activate
+                            python3 scripts/release_manager.py create \
+                                --env ${params.ENVIRONMENT} \
+                                --bump ${params.BUMP_TYPE} \
+                                --json
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    def release = readJSON text: createResult
+
+                    env.RELEASE_VERSION = release.version
+                    env.MANIFEST_PATH = release.manifest_path
+
+                    echo """
+                    ========================================
+                    Release Created
+                    ========================================
+                    Version: ${env.RELEASE_VERSION}
+                    Manifest: ${env.MANIFEST_PATH}
+                    Services: ${release.services.size()}
+                    ========================================
+                    """
+
+                    // Archive manifest
+                    archiveArtifacts artifacts: "${env.MANIFEST_PATH}", fingerprint: true
+                }
+            }
+        }
+
+        stage('List Releases') {
+            when {
+                expression { params.ACTION == 'list' }
+            }
+            steps {
+                script {
+                    echo "Listing recent releases..."
+
+                    sh """
+                        . venv/bin/activate
+                        python3 scripts/release_manager.py list \
+                            --env ${params.ENVIRONMENT}
+                    """
+                }
+            }
+        }
+
+        stage('Commit Release Manifest') {
+            when {
+                expression { params.ACTION == 'create' && env.RELEASE_VERSION }
+            }
+            steps {
+                script {
+                    echo "Committing release manifest to repository..."
+
+                    sh """
+                        git config user.email "jenkins@example.com"
+                        git config user.name "Jenkins Release Bot"
+
+                        git add releases/ releases_index.json
+                        git commit -m "Release ${env.RELEASE_VERSION} for ${params.ENVIRONMENT}" || echo "No changes to commit"
+
+                        # Push to repository (configure credentials in Jenkins)
+                        # git push origin main
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                if (params.ACTION == 'create' && env.RELEASE_VERSION) {
+                    echo """
+                    ========================================
+                    ✅ Release ${env.RELEASE_VERSION} Created
+                    ========================================
+                    """
+
+                    emailext(
+                        subject: "✅ Release ${env.RELEASE_VERSION} Created",
+                        body: """
+                        <h2>New Release Created</h2>
+                        <ul>
+                            <li><b>Version:</b> ${env.RELEASE_VERSION}</li>
+                            <li><b>Environment:</b> ${params.ENVIRONMENT}</li>
+                            <li><b>Bump Type:</b> ${params.BUMP_TYPE}</li>
+                            <li><b>Changes:</b> ${env.CHANGES ?: 'None'}</li>
+                            <li><b>Build:</b> ${env.BUILD_URL}</li>
+                        </ul>
+                        <p>Manifest: ${env.MANIFEST_PATH}</p>
+                        """,
+                        mimeType: 'text/html',
+                        to: 'dev-team@example.com'
+                    )
+                } else {
+                    echo "✅ Release operation completed successfully"
+                }
+            }
+        }
+
+        failure {
+            echo "❌ Release operation failed"
+
+            emailext(
+                subject: "❌ Release Operation Failed",
+                body: """
+                <h2>Release Operation Failed</h2>
+                <ul>
+                    <li><b>Action:</b> ${params.ACTION}</li>
+                    <li><b>Environment:</b> ${params.ENVIRONMENT}</li>
+                    <li><b>Build:</b> ${env.BUILD_URL}</li>
+                </ul>
+                <p>Please check the console output for details.</p>
+                """,
+                mimeType: 'text/html',
+                to: 'dev-team@example.com',
+                attachLog: true
+            )
+        }
+
+        always {
+            cleanWs()
+        }
+    }
+}

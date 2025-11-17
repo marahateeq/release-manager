@@ -15,7 +15,7 @@ services:
 metadata:
   bump_type: "{{ metadata.bump_type }}"
   previous_version: "{{ metadata.previous_version }}"
-  changes: {{ metadata.changes | default([]) }}
+  changes: []
   notes: "{{ metadata.notes | default('') }}"
 
 # Build information
@@ -26,6 +26,6 @@ build:
 
 # Deployment status
 deployment:
-  dev: {{ deployment.dev | default(false) }}
-  qa: {{ deployment.qa | default(false) }}
-  prod: {{ deployment.prod | default(false) }}
+  dev: false
+  qa: false
+  prod: false

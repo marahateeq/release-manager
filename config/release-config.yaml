@@ -57,7 +57,7 @@ manifest:
 notifications:
   enabled: true
   email:
-    - dev-team@example.com
+    - marahateeq@gmail.com
   slack:
     enabled: false
     webhook_url: ""

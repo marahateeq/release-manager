@@ -58,7 +58,15 @@ pipeline {
             steps {
                 script {
                     sh """
-                        python3 -m venv venv
+                        # Try using venv, if not available use virtualenv
+                        if python3 -m venv venv 2>/dev/null; then
+                            echo "Created venv using python3 -m venv"
+                        else
+                            echo "venv module not available, trying virtualenv..."
+                            pip3 install --user virtualenv
+                            python3 -m virtualenv venv
+                        fi
+
                         . venv/bin/activate
                         pip install --upgrade pip
                         pip install -r requirements.txt

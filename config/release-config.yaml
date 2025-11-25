@@ -2,25 +2,83 @@
 
 # Environments
 environments:
+  # Local/Development Environments - Support both individual service and release deployment
   dev:
+    type: local
     release_tracking: false  # No release tracking in dev
     auto_release: false
+    deployment_modes:
+      - service     # Can deploy individual services
+      - release     # Can deploy aurora releases
+    config_branch: dev
 
+  qa-local:
+    type: local
+    release_tracking: false
+    auto_release: false
+    deployment_modes:
+      - service
+      - release
+    config_branch: dev
+
+  staging:
+    type: local
+    release_tracking: true
+    auto_release: false
+    deployment_modes:
+      - service
+      - release
+    config_branch: qa
+
+  # QA Environment - Can create and deploy aurora releases
   qa:
+    type: qa
     release_tracking: true   # Track all releases in QA
     auto_release: true       # Automatically create releases
     default_bump: patch
+    deployment_modes:
+      - service     # Can deploy individual services for testing
+      - release     # Can deploy aurora releases
+    config_branch: qa
+    can_create_release: true  # Can create new aurora releases
+
+  # Production Environments - Only support aurora release deployment
+  polaris:
+    type: production
+    release_tracking: true
+    auto_release: false
+    deployment_modes:
+      - release     # Only aurora releases allowed
+    config_branch: main
+    can_create_release: false
 
   prod:
+    type: production
     release_tracking: true
     auto_release: false      # Manual release process
     default_bump: minor      # More conservative bumps in prod
+    deployment_modes:
+      - release     # Only aurora releases allowed
+    config_branch: main
+    can_create_release: false
 
 # Services to track
 services:
   - user-api
   - product-frontend
   - data-processor
+
+# Service repositories (for fetching tags)
+service_repositories:
+  user-api:
+    url: https://github.com/yourorg/user-api.git
+    type: standard
+  product-frontend:
+    url: https://github.com/yourorg/product-frontend.git
+    type: standard
+  data-processor:
+    url: https://github.com/yourorg/data-processor.git
+    type: system
 
 # Version bumping rules
 versioning:

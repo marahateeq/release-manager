@@ -1,0 +1,476 @@
+// Jenkins Pipeline for Service Deployment
+// Supports both individual service deployment and aurora release deployment
+
+@Library('shared-pipeline-library') _
+
+pipeline {
+    agent any
+
+    options {
+        disableConcurrentBuilds()
+        timeout(time: 30, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+    }
+
+    parameters {
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['dev', 'qa', 'qa-local', 'staging', 'polaris', 'prod'],
+            description: 'Target environment for deployment'
+        )
+        choice(
+            name: 'DEPLOYMENT_MODE',
+            choices: ['SERVICE', 'RELEASE'],
+            description: 'Deploy individual service or full aurora release'
+        )
+        // Service deployment parameters
+        choice(
+            name: 'SERVICE_NAME',
+            choices: ['user-api', 'product-frontend', 'data-processor'],
+            description: 'Service to deploy (only for SERVICE mode)'
+        )
+        string(
+            name: 'SERVICE_TAG',
+            defaultValue: '',
+            description: 'Service tag/version to deploy (only for SERVICE mode). Leave empty to load available tags.'
+        )
+        // Release deployment parameters
+        string(
+            name: 'RELEASE_VERSION',
+            defaultValue: '',
+            description: 'Aurora release version to deploy (only for RELEASE mode). Leave empty to list available releases.'
+        )
+        // Action parameters
+        choice(
+            name: 'ACTION',
+            choices: ['DEPLOY', 'CREATE_RELEASE', 'LIST_TAGS', 'LIST_RELEASES'],
+            description: 'Action to perform'
+        )
+        booleanParam(
+            name: 'DRY_RUN',
+            defaultValue: false,
+            description: 'Perform a dry run without actual deployment'
+        )
+    }
+
+    environment {
+        PYTHONUNBUFFERED = '1'
+        DEPLOYMENT_CONFIG_REPO = 'https://github.com/yourorg/pipeline-deployment-config.git'
+        DEPLOYMENT_RUNNER_REPO = 'https://github.com/yourorg/pipeline-deployment.git'
+
+        // Environment classification
+        LOCAL_ENVS = 'dev,qa-local,staging'
+        PROD_ENVS = 'polaris,prod'
+
+        // Branches for deployment config
+        DEV_BRANCH = 'dev'
+        QA_BRANCH = 'qa'
+        PROD_BRANCH = 'main'
+    }
+
+    stages {
+        stage('Initialize') {
+            steps {
+                script {
+                    echo """
+                    ========================================
+                    Deployment Pipeline
+                    ========================================
+                    Environment: ${params.ENVIRONMENT}
+                    Mode: ${params.DEPLOYMENT_MODE}
+                    Action: ${params.ACTION}
+                    ${params.DEPLOYMENT_MODE == 'SERVICE' ? 'Service: ' + params.SERVICE_NAME + '\nTag: ' + params.SERVICE_TAG : ''}
+                    ${params.DEPLOYMENT_MODE == 'RELEASE' ? 'Release: ' + params.RELEASE_VERSION : ''}
+                    Dry Run: ${params.DRY_RUN}
+                    ========================================
+                    """
+
+                    // Validate environment vs deployment mode
+                    env.IS_LOCAL_ENV = env.LOCAL_ENVS.contains(params.ENVIRONMENT)
+                    env.IS_PROD_ENV = env.PROD_ENVS.contains(params.ENVIRONMENT)
+
+                    if (env.IS_PROD_ENV == 'true' && params.DEPLOYMENT_MODE == 'SERVICE') {
+                        error("❌ Production environment '${params.ENVIRONMENT}' only supports RELEASE deployment mode")
+                    }
+
+                    // Determine config branch based on environment
+                    if (params.ENVIRONMENT in ['dev', 'qa-local']) {
+                        env.CONFIG_BRANCH = env.DEV_BRANCH
+                    } else if (params.ENVIRONMENT == 'qa') {
+                        env.CONFIG_BRANCH = env.QA_BRANCH
+                    } else {
+                        env.CONFIG_BRANCH = env.PROD_BRANCH
+                    }
+
+                    echo "Using deployment config branch: ${env.CONFIG_BRANCH}"
+                }
+            }
+        }
+
+        stage('Setup Python Environment') {
+            steps {
+                script {
+                    sh """
+                        # Create virtual environment
+                        python3 -m venv venv
+                        . venv/bin/activate
+
+                        # Install dependencies
+                        pip install --upgrade pip
+                        pip install -r requirements.txt
+
+                        echo "✅ Python environment ready"
+                    """
+                }
+            }
+        }
+
+        stage('Checkout Deployment Config') {
+            steps {
+                script {
+                    dir('pipeline-deployment-config') {
+                        git branch: "${env.CONFIG_BRANCH}",
+                            url: "${env.DEPLOYMENT_CONFIG_REPO}",
+                            credentialsId: 'github-credentials'
+                    }
+                    echo "✅ Checked out deployment config from ${env.CONFIG_BRANCH} branch"
+                }
+            }
+        }
+
+        stage('List Available Service Tags') {
+            when {
+                expression { params.ACTION == 'LIST_TAGS' }
+            }
+            steps {
+                script {
+                    echo "Fetching available tags for ${params.SERVICE_NAME}..."
+
+                    def tags = sh(
+                        script: """
+                            . venv/bin/activate
+                            python3 scripts/service_tag_fetcher.py \
+                                --service ${params.SERVICE_NAME} \
+                                --limit 20
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    echo """
+                    ========================================
+                    Available Tags for ${params.SERVICE_NAME}
+                    ========================================
+                    ${tags}
+                    ========================================
+                    """
+                }
+            }
+        }
+
+        stage('List Available Releases') {
+            when {
+                expression { params.ACTION == 'LIST_RELEASES' }
+            }
+            steps {
+                script {
+                    echo "Fetching available aurora releases..."
+
+                    def releases = sh(
+                        script: """
+                            . venv/bin/activate
+                            python3 scripts/release_manager.py list \
+                                --env ${params.ENVIRONMENT} \
+                                --limit 20
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    echo """
+                    ========================================
+                    Available Aurora Releases
+                    ========================================
+                    ${releases}
+                    ========================================
+                    """
+                }
+            }
+        }
+
+        stage('Create Aurora Release') {
+            when {
+                expression {
+                    params.ACTION == 'CREATE_RELEASE' &&
+                    params.ENVIRONMENT == 'qa'
+                }
+            }
+            steps {
+                script {
+                    echo "Creating aurora release from QA environment versions..."
+
+                    def releaseResult = sh(
+                        script: """
+                            . venv/bin/activate
+                            python3 scripts/release_manager.py create \
+                                --env ${params.ENVIRONMENT} \
+                                --config-repo pipeline-deployment-config \
+                                --config-branch ${env.CONFIG_BRANCH} \
+                                --json
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    def release = readJSON text: releaseResult
+
+                    env.RELEASE_VERSION = release.version
+                    env.MANIFEST_PATH = release.manifest_path
+
+                    echo """
+                    ========================================
+                    Aurora Release Created
+                    ========================================
+                    Version: ${env.RELEASE_VERSION}
+                    Manifest: ${env.MANIFEST_PATH}
+                    Services: ${release.services.size()}
+                    ========================================
+                    """
+
+                    // Archive the release manifest
+                    archiveArtifacts artifacts: "${env.MANIFEST_PATH}", fingerprint: true
+                }
+            }
+        }
+
+        stage('Tag and Push Release') {
+            when {
+                expression {
+                    params.ACTION == 'CREATE_RELEASE' &&
+                    env.RELEASE_VERSION
+                }
+            }
+            steps {
+                script {
+                    echo "Tagging release ${env.RELEASE_VERSION} in GitHub..."
+
+                    withCredentials([usernamePassword(
+                        credentialsId: 'github-credentials',
+                        usernameVariable: 'GIT_USER',
+                        passwordVariable: 'GIT_TOKEN'
+                    )]) {
+                        sh """
+                            git config user.email "jenkins@yourorg.com"
+                            git config user.name "Jenkins Release Bot"
+
+                            # Add release files
+                            git add releases/ releases_index.json
+                            git commit -m "Release ${env.RELEASE_VERSION} for ${params.ENVIRONMENT}"
+
+                            # Create and push tag
+                            git tag -a "v${env.RELEASE_VERSION}" -m "Aurora Release ${env.RELEASE_VERSION}"
+
+                            # Push commits and tags
+                            git push https://${GIT_USER}:${GIT_TOKEN}@github.com/yourorg/release-manager.git HEAD:main
+                            git push https://${GIT_USER}:${GIT_TOKEN}@github.com/yourorg/release-manager.git --tags
+
+                            echo "✅ Release ${env.RELEASE_VERSION} tagged and pushed"
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Deploy Individual Service') {
+            when {
+                expression {
+                    params.ACTION == 'DEPLOY' &&
+                    params.DEPLOYMENT_MODE == 'SERVICE'
+                }
+            }
+            steps {
+                script {
+                    echo "Deploying ${params.SERVICE_NAME}:${params.SERVICE_TAG} to ${params.ENVIRONMENT}..."
+
+                    if (!params.SERVICE_TAG) {
+                        error("❌ SERVICE_TAG parameter is required for service deployment")
+                    }
+
+                    // Update docker-compose file with new tag
+                    sh """
+                        . venv/bin/activate
+                        python3 scripts/update_service_tag.py \
+                            --service ${params.SERVICE_NAME} \
+                            --tag ${params.SERVICE_TAG} \
+                            --environment ${params.ENVIRONMENT} \
+                            --config-dir pipeline-deployment-config \
+                            --branch ${env.CONFIG_BRANCH}
+                    """
+
+                    // Trigger deployment via pipeline-deployment repo
+                    if (!params.DRY_RUN) {
+                        dir('pipeline-deployment') {
+                            git url: "${env.DEPLOYMENT_RUNNER_REPO}",
+                                credentialsId: 'github-credentials'
+
+                            sh """
+                                . ../venv/bin/activate
+                                python3 deploy.py \
+                                    --service ${params.SERVICE_NAME} \
+                                    --environment ${params.ENVIRONMENT} \
+                                    --config-repo ../pipeline-deployment-config
+                            """
+                        }
+
+                        echo "✅ ${params.SERVICE_NAME}:${params.SERVICE_TAG} deployed successfully"
+                    } else {
+                        echo "✅ Dry run completed - no actual deployment performed"
+                    }
+                }
+            }
+        }
+
+        stage('Deploy Aurora Release') {
+            when {
+                expression {
+                    params.ACTION == 'DEPLOY' &&
+                    params.DEPLOYMENT_MODE == 'RELEASE'
+                }
+            }
+            steps {
+                script {
+                    echo "Deploying aurora release ${params.RELEASE_VERSION} to ${params.ENVIRONMENT}..."
+
+                    if (!params.RELEASE_VERSION) {
+                        error("❌ RELEASE_VERSION parameter is required for release deployment")
+                    }
+
+                    // Load release manifest
+                    def manifestPath = "releases/aurora-${params.RELEASE_VERSION}.yaml"
+                    if (!fileExists(manifestPath)) {
+                        error("❌ Release manifest not found: ${manifestPath}")
+                    }
+
+                    def manifest = readYaml file: manifestPath
+
+                    echo """
+                    Deploying aurora release:
+                    - Version: ${manifest.version}
+                    - Services: ${manifest.services.size()}
+                    - Created: ${manifest.created_at}
+                    """
+
+                    // Update all service versions in deployment config
+                    manifest.services.each { service, version ->
+                        sh """
+                            . venv/bin/activate
+                            python3 scripts/update_service_tag.py \
+                                --service ${service} \
+                                --tag ${version} \
+                                --environment ${params.ENVIRONMENT} \
+                                --config-dir pipeline-deployment-config \
+                                --branch ${env.CONFIG_BRANCH}
+                        """
+                    }
+
+                    // Trigger full deployment via pipeline-deployment repo
+                    if (!params.DRY_RUN) {
+                        dir('pipeline-deployment') {
+                            git url: "${env.DEPLOYMENT_RUNNER_REPO}",
+                                credentialsId: 'github-credentials'
+
+                            sh """
+                                . ../venv/bin/activate
+                                python3 deploy.py \
+                                    --release ${params.RELEASE_VERSION} \
+                                    --environment ${params.ENVIRONMENT} \
+                                    --config-repo ../pipeline-deployment-config
+                            """
+                        }
+
+                        echo "✅ Aurora release ${params.RELEASE_VERSION} deployed successfully"
+                    } else {
+                        echo "✅ Dry run completed - no actual deployment performed"
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                def message = ""
+
+                if (params.ACTION == 'CREATE_RELEASE' && env.RELEASE_VERSION) {
+                    message = """
+                    <h2>✅ Aurora Release Created</h2>
+                    <ul>
+                        <li><b>Version:</b> ${env.RELEASE_VERSION}</li>
+                        <li><b>Environment:</b> ${params.ENVIRONMENT}</li>
+                        <li><b>Manifest:</b> ${env.MANIFEST_PATH}</li>
+                        <li><b>Build:</b> ${env.BUILD_URL}</li>
+                    </ul>
+                    """
+                } else if (params.ACTION == 'DEPLOY' && params.DEPLOYMENT_MODE == 'SERVICE') {
+                    message = """
+                    <h2>✅ Service Deployed</h2>
+                    <ul>
+                        <li><b>Service:</b> ${params.SERVICE_NAME}</li>
+                        <li><b>Tag:</b> ${params.SERVICE_TAG}</li>
+                        <li><b>Environment:</b> ${params.ENVIRONMENT}</li>
+                        <li><b>Build:</b> ${env.BUILD_URL}</li>
+                    </ul>
+                    """
+                } else if (params.ACTION == 'DEPLOY' && params.DEPLOYMENT_MODE == 'RELEASE') {
+                    message = """
+                    <h2>✅ Aurora Release Deployed</h2>
+                    <ul>
+                        <li><b>Release:</b> ${params.RELEASE_VERSION}</li>
+                        <li><b>Environment:</b> ${params.ENVIRONMENT}</li>
+                        <li><b>Build:</b> ${env.BUILD_URL}</li>
+                    </ul>
+                    """
+                } else {
+                    message = """
+                    <h2>✅ Operation Completed</h2>
+                    <ul>
+                        <li><b>Action:</b> ${params.ACTION}</li>
+                        <li><b>Environment:</b> ${params.ENVIRONMENT}</li>
+                        <li><b>Build:</b> ${env.BUILD_URL}</li>
+                    </ul>
+                    """
+                }
+
+                emailext(
+                    subject: "✅ Deployment Pipeline - ${params.ACTION} Success",
+                    body: message,
+                    mimeType: 'text/html',
+                    to: 'dev-team@yourorg.com'
+                )
+            }
+        }
+
+        failure {
+            echo "❌ Pipeline failed"
+
+            emailext(
+                subject: "❌ Deployment Pipeline Failed",
+                body: """
+                <h2>❌ Deployment Pipeline Failed</h2>
+                <ul>
+                    <li><b>Action:</b> ${params.ACTION}</li>
+                    <li><b>Environment:</b> ${params.ENVIRONMENT}</li>
+                    <li><b>Mode:</b> ${params.DEPLOYMENT_MODE}</li>
+                    <li><b>Build:</b> ${env.BUILD_URL}</li>
+                </ul>
+                <p>Please check the console output for details.</p>
+                """,
+                mimeType: 'text/html',
+                to: 'dev-team@yourorg.com',
+                attachLog: true
+            )
+        }
+
+        always {
+            cleanWs(deleteDirs: true)
+        }
+    }
+}

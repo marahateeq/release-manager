@@ -70,6 +70,17 @@ pipeline {
                         . venv/bin/activate
                         pip install --upgrade pip
                         pip install -r requirements.txt
+
+                        # Verify PyYAML installation
+                        echo ""
+                        echo "=========================================="
+                        echo "Verifying Python Dependencies..."
+                        echo "=========================================="
+                        python3 -c "import yaml; print('✅ PyYAML version:', yaml.__version__)" || {
+                            echo "❌ PyYAML installation failed"
+                            exit 1
+                        }
+                        echo "✅ All dependencies verified"
                     """
                 }
             }

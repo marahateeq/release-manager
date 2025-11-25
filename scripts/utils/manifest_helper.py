@@ -3,11 +3,19 @@ Manifest Helper
 CRUD operations for release manifests
 """
 
+import sys
 import json
-import yaml
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional
+
+# Check for required dependencies
+try:
+    import yaml
+except ImportError:
+    print("❌ Error: PyYAML is not installed")
+    print("Please install it with: pip install -r requirements.txt")
+    sys.exit(1)
 
 class ManifestHelper:
     """Helper class for manifest operations"""

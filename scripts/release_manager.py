@@ -8,9 +8,16 @@ import sys
 import os
 import argparse
 import json
-import yaml
 from pathlib import Path
 from datetime import datetime
+
+# Check for required dependencies
+try:
+    import yaml
+except ImportError:
+    print("❌ Error: PyYAML is not installed")
+    print("Please install it with: pip install -r requirements.txt")
+    sys.exit(1)
 
 # Add utils directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'utils'))
@@ -36,7 +43,7 @@ class ReleaseManager:
             print(f"Error loading config: {e}")
             sys.exit(1)
 
-    def detect_changes(self, environment='qa'):
+    def detect_changes(self, environment='qa', config_repo_path=None):
         """Detect if a new release is needed"""
         print(f"\n{'='*60}")
         print(f"Detecting changes for {environment.upper()} environment")
@@ -49,7 +56,7 @@ class ReleaseManager:
             return {'new_release_needed': False}
 
         # Get current service versions from deployment config
-        current_versions = self.get_current_versions(environment)
+        current_versions = self.get_current_versions(environment, config_repo_path)
 
         # Get latest release
         latest_release = self.manifest_helper.get_latest_manifest()
@@ -90,14 +97,14 @@ class ReleaseManager:
                 'changes': []
             }
 
-    def create_release(self, environment='qa', version_bump='patch'):
+    def create_release(self, environment='qa', version_bump='patch', config_repo_path=None):
         """Create a new release"""
         print(f"\n{'='*60}")
         print(f"Creating release for {environment.upper()} environment")
         print(f"{'='*60}\n")
 
         # Get current service versions
-        current_versions = self.get_current_versions(environment)
+        current_versions = self.get_current_versions(environment, config_repo_path)
 
         # Determine next version
         latest_release = self.manifest_helper.get_latest_manifest()
@@ -135,20 +142,92 @@ class ReleaseManager:
             'services': current_versions
         }
 
-    def get_current_versions(self, environment):
+    def get_current_versions(self, environment, config_repo_path=None):
         """Get current service versions from deployment config"""
-        # In a real implementation, this would read from deployment-config
-        # For this example, we'll use dummy versions
-
         services = {}
 
-        # Read from config
-        for service in self.config.get('services', []):
-            # Simulate reading version from deployment config
-            # In production, read from docker-compose.yaml.j2 files
-            services[service] = '1.0.0'  # Placeholder
+        # If config_repo_path is provided, read from there
+        if config_repo_path:
+            from pathlib import Path
+            config_path = Path(config_repo_path)
+
+            # First try to read from environment-specific vars file
+            vars_file = config_path / 'vars' / f'{environment}-vars.yml'
+
+            if vars_file.exists():
+                try:
+                    with open(vars_file, 'r') as f:
+                        vars_data = yaml.safe_load(f) or {}
+
+                    service_versions = vars_data.get('service_versions', {})
+
+                    if service_versions:
+                        print(f"✅ Loaded versions from {vars_file.name}")
+                        for service in self.config.get('services', []):
+                            version = service_versions.get(service)
+                            if version:
+                                services[service] = version
+                                print(f"  {service}: {version}")
+
+                        return services
+
+                except Exception as e:
+                    print(f"⚠️  Error reading vars file: {e}")
+
+            # Fallback: Parse docker-compose.yaml.j2 files
+            print(f"Reading versions from docker-compose files...")
+
+            for service in self.config.get('services', []):
+                # Try standard services directory
+                compose_file = config_path / 'services' / service / 'docker-compose.yaml.j2'
+
+                if not compose_file.exists():
+                    # Try system-services directory
+                    compose_file = config_path / 'system-services' / service / 'docker-compose.yaml.j2'
+
+                if compose_file.exists():
+                    version = self._extract_version_from_compose(compose_file, service)
+                    if version:
+                        services[service] = version
+                        print(f"  {service}: {version}")
+                else:
+                    print(f"  ⚠️  Compose file not found for {service}")
+        else:
+            # Fallback to placeholder versions
+            print("⚠️  No config repo path provided, using placeholder versions")
+            for service in self.config.get('services', []):
+                services[service] = '1.0.0'
 
         return services
+
+    def _extract_version_from_compose(self, compose_file, service_name):
+        """Extract version from docker-compose file"""
+        try:
+            with open(compose_file, 'r') as f:
+                content = f.read()
+
+            # Look for image line and extract version
+            import re
+
+            # Pattern 1: default('version') in Jinja2 template
+            pattern1 = rf"default\(['\"]([^'\"]+)['\"]\)"
+            match = re.search(pattern1, content)
+            if match:
+                version = match.group(1)
+                if version != 'latest':
+                    return version
+
+            # Pattern 2: hardcoded version in image tag
+            pattern2 = rf"{service_name}:([^\s\"'}}]+)"
+            match = re.search(pattern2, content)
+            if match:
+                return match.group(1)
+
+            return None
+
+        except Exception as e:
+            print(f"Error extracting version from {compose_file}: {e}")
+            return None
 
     def list_releases(self, limit=10):
         """List recent releases"""
@@ -197,8 +276,14 @@ def main():
     parser.add_argument('--bump', default='patch',
                        choices=['patch', 'minor', 'major'],
                        help='Version bump type')
+    parser.add_argument('--config-repo',
+                       help='Path to deployment config repository')
+    parser.add_argument('--config-branch',
+                       help='Branch of deployment config to use')
     parser.add_argument('--json', action='store_true',
                        help='Output as JSON')
+    parser.add_argument('--limit', type=int, default=10,
+                       help='Limit for list command')
 
     args = parser.parse_args()
 
@@ -207,7 +292,7 @@ def main():
 
     # Execute command
     if args.command == 'detect':
-        result = manager.detect_changes(args.env)
+        result = manager.detect_changes(args.env, args.config_repo)
 
         if args.json:
             print(json.dumps(result, indent=2))
@@ -221,7 +306,7 @@ def main():
         sys.exit(0 if result['new_release_needed'] else 1)
 
     elif args.command == 'create':
-        result = manager.create_release(args.env, args.bump)
+        result = manager.create_release(args.env, args.bump, args.config_repo)
 
         if args.json:
             print(json.dumps(result, indent=2))
@@ -229,7 +314,7 @@ def main():
         sys.exit(0)
 
     elif args.command == 'list':
-        result = manager.list_releases()
+        result = manager.list_releases(args.limit)
 
         if args.json:
             print(json.dumps(result, indent=2))

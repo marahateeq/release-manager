@@ -464,7 +464,7 @@ pipeline {
                 <p>Please check the console output for details.</p>
                 """,
                 mimeType: 'text/html',
-                to: 'dev-team@yourorg.com',
+                to: 'marahateeq@gmail.com',
                 attachLog: true
             )
         }
